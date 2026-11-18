@@ -1,111 +1,150 @@
-// Sound for Coral Keys, synthesized live with WebAudio: no audio files, no
-// network. Engine hum, sirens, gunshots, pickup chimes and a lazy island
-// arpeggio. Everything is guarded: in a headless screenshot run the audio
-// context may not exist, and the game must still play silently.
-let context = null;
-let master = null;
-let engineOsc = null;
-let engineGain = null;
-let sirenOsc = null;
-let sirenGain = null;
-let musicTimer = null;
-let muted = false;
+// Coral Keys — procedural WebAudio sound.
+// Every sound is synthesised in code (oscillators + noise). No audio files.
+var CK = window.CK || {};
+CK.audio = (function () {
+  var ctx = null;
+  var master = null;
+  var muted = false;
+  var engineOsc = null;
+  var engineGain = null;
+  var musicTimer = null;
+  var musicStep = 0;
 
-// A lazy island arpeggio, one note every 450 ms, climbing a little higher
-// in this draft so the loop feels less like a metronome.
-const MELODY = [523.25, 659.25, 783.99, 1046.5, 880.0, 783.99, 659.25, 587.33];
-let melodyStep = 0;
-
-export function initAudio() {
-  if (context) return;
-  try {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    context = new AudioContext();
-    master = context.createGain();
-    master.gain.value = 0.5;
-    master.connect(context.destination);
-
-    engineOsc = context.createOscillator();
-    engineOsc.type = 'sawtooth';
-    engineOsc.frequency.value = 60;
-    engineGain = context.createGain();
-    engineGain.gain.value = 0;
-    engineOsc.connect(engineGain);
-    engineGain.connect(master);
-    engineOsc.start();
-
-    sirenOsc = context.createOscillator();
-    sirenOsc.type = 'sine';
-    sirenOsc.frequency.value = 700;
-    sirenGain = context.createGain();
-    sirenGain.gain.value = 0;
-    sirenOsc.connect(sirenGain);
-    sirenGain.connect(master);
-    sirenOsc.start();
-
-    musicTimer = window.setInterval(() => {
-      if (muted || !context) return;
-      const note = MELODY[melodyStep % MELODY.length];
-      melodyStep += 1;
-      const osc = context.createOscillator();
-      const gain = context.createGain();
-      osc.type = 'triangle';
-      osc.frequency.value = note;
-      gain.gain.setValueAtTime(0.05, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.9);
-      osc.connect(gain);
-      gain.connect(master);
-      osc.start();
-      osc.stop(context.currentTime + 1);
-    }, 450);
-  } catch {
-    context = null;
-  }
-}
-
-function blip(frequency, duration, type, volume) {
-  if (!context || muted) return;
-  try {
-    const osc = context.createOscillator();
-    const gain = context.createGain();
-    osc.type = type || 'sine';
-    osc.frequency.value = frequency;
-    gain.gain.setValueAtTime(volume || 0.15, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + duration);
-    osc.connect(gain);
-    gain.connect(master);
-    osc.start();
-    osc.stop(context.currentTime + duration + 0.05);
-  } catch {
-    // Audio is decoration; a failure never stops the game.
-  }
-}
-
-export function playPickup() { blip(880, 0.15, 'sine', 0.2); window.setTimeout(() => blip(1318, 0.2, 'sine', 0.15), 90); }
-export function playShot() { blip(160, 0.12, 'square', 0.25); }
-export function playMissionDone() { [523, 659, 784, 1046].forEach((f, i) => window.setTimeout(() => blip(f, 0.25, 'triangle', 0.2), i * 110)); }
-export function playHorn() { blip(330, 0.3, 'sawtooth', 0.12); }
-
-/** Engine pitch follows speed; the siren wails only while Kai is wanted. */
-export function updateEngine(speed, wanted) {
-  if (!context) return;
-  try {
-    const now = context.currentTime;
-    engineGain.gain.setTargetAtTime(muted ? 0 : Math.min(0.12, Math.abs(speed) / 520 * 0.12), now, 0.1);
-    engineOsc.frequency.setTargetAtTime(50 + Math.abs(speed) * 0.25, now, 0.1);
-    if (wanted > 0 && !muted) {
-      sirenGain.gain.setTargetAtTime(0.05, now, 0.2);
-      sirenOsc.frequency.setTargetAtTime(650 + 250 * Math.sin(now * 3), now, 0.05);
-    } else {
-      sirenGain.gain.setTargetAtTime(0, now, 0.2);
+  function ensure() {
+    if (ctx) return true;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = muted ? 0 : 0.5;
+      master.connect(ctx.destination);
+      return true;
+    } catch (e) {
+      return false;
     }
-  } catch {
-    // Ignore audio errors.
   }
-}
 
-export function toggleMute() {
-  muted = !muted;
-  if (master) master.gain.value = muted ? 0 : 0.5;
-  return muted;
-}
+  function unlock() {
+    if (ensure() && ctx.state === 'suspended') ctx.resume();
+  }
+
+  function setMuted(m) {
+    muted = m;
+    if (master) master.gain.value = m ? 0 : 0.5;
+  }
+
+  function isMuted() { return muted; }
+
+  function tone(freq, dur, type, vol, slideTo) {
+    if (!ensure() || muted) return;
+    var o = ctx.createOscillator();
+    var g = ctx.createGain();
+    o.type = type || 'sine';
+    o.frequency.setValueAtTime(freq, ctx.currentTime);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, ctx.currentTime + dur);
+    g.gain.setValueAtTime(vol || 0.2, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+    o.connect(g); g.connect(master);
+    o.start(); o.stop(ctx.currentTime + dur);
+  }
+
+  function noiseBurst(dur, vol, lowpass) {
+    if (!ensure() || muted) return;
+    var len = Math.floor(ctx.sampleRate * dur);
+    var buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    var src = ctx.createBufferSource();
+    src.buffer = buf;
+    var f = ctx.createBiquadFilter();
+    f.type = 'lowpass'; f.frequency.value = lowpass || 1200;
+    var g = ctx.createGain();
+    g.gain.value = vol || 0.4;
+    src.connect(f); f.connect(g); g.connect(master);
+    src.start();
+  }
+
+  function shoot() {
+    noiseBurst(0.14, 0.5, 2500);
+    tone(180, 0.1, 'square', 0.18, 60);
+  }
+
+  function pickup() {
+    tone(660, 0.12, 'sine', 0.25);
+    setTimeout(function () { tone(880, 0.18, 'sine', 0.25); }, 110);
+  }
+
+  function missionDone() {
+    [523, 659, 784, 1047].forEach(function (f, i) {
+      setTimeout(function () { tone(f, 0.22, 'triangle', 0.25); }, i * 130);
+    });
+  }
+
+  function busted() {
+    tone(220, 0.5, 'sawtooth', 0.2, 110);
+    setTimeout(function () { tone(165, 0.7, 'sawtooth', 0.2, 82); }, 400);
+  }
+
+  // Two-tone police siren, looping while wanted.
+  var sirenTimer = null;
+  function startSiren() {
+    if (sirenTimer || !ensure()) return;
+    var high = true;
+    sirenTimer = setInterval(function () {
+      if (muted) return;
+      tone(high ? 950 : 700, 0.4, 'sine', 0.07);
+      high = !high;
+    }, 420);
+  }
+  function stopSiren() {
+    if (sirenTimer) { clearInterval(sirenTimer); sirenTimer = null; }
+  }
+
+  // Engine hum: one oscillator whose pitch follows speed.
+  function engine(speed01) {
+    if (!ensure()) return;
+    if (!engineOsc) {
+      engineOsc = ctx.createOscillator();
+      engineGain = ctx.createGain();
+      engineOsc.type = 'sawtooth';
+      engineOsc.frequency.value = 50;
+      engineGain.gain.value = 0;
+      var f = ctx.createBiquadFilter();
+      f.type = 'lowpass'; f.frequency.value = 500;
+      engineOsc.connect(f); f.connect(engineGain); engineGain.connect(master);
+      engineOsc.start();
+    }
+    engineOsc.frequency.value = 45 + speed01 * 110;
+    engineGain.gain.value = muted ? 0 : 0.02 + speed01 * 0.06;
+  }
+
+  // Island music: a slow major arpeggio loop.
+  var islandNotes = [262, 330, 392, 523, 392, 330];
+  function startMusic() {
+    if (musicTimer || !ensure()) return;
+    musicTimer = setInterval(function () {
+      if (muted) return;
+      tone(islandNotes[musicStep % islandNotes.length], 0.5, 'triangle', 0.06);
+      musicStep++;
+    }, 520);
+  }
+  function stopMusic() {
+    if (musicTimer) { clearInterval(musicTimer); musicTimer = null; }
+  }
+
+  return {
+    unlock: unlock,
+    setMuted: setMuted,
+    isMuted: isMuted,
+    shoot: shoot,
+    pickup: pickup,
+    missionDone: missionDone,
+    busted: busted,
+    startSiren: startSiren,
+    stopSiren: stopSiren,
+    engine: engine,
+    startMusic: startMusic,
+    stopMusic: stopMusic
+  };
+})();

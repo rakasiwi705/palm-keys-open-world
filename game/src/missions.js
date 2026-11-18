@@ -1,117 +1,182 @@
-// The story of Coral Keys: three missions from Marisol at the bait shop.
-// Each mission has an objective marker on the map and in the HUD, a short
-// line of dialogue, and a cash reward. Finishing all three ends the story;
-// the town stays open for free roam afterwards.
-import { LANDMARKS, MISSION_REWARDS } from './config.js';
-import { raiseWanted } from './police.js';
+// Coral Keys — story missions.
+// Three original missions with a 3D beacon marking the objective in the
+// world (a tall glowing cylinder) plus HUD text. All characters and places
+// are original.
+var CK = window.CK || {};
+CK.missions = (function () {
+  var cfg = CK.config;
+  var scene = null;
+  var beacon = null;
+  var index = 0; // 0,1,2 missions, 3 = story complete (free roam)
+  var stage = 0; // sub-step inside a mission
+  var carryingCrate = false;
+  var message = '';
+  var messageUntil = 0;
 
-export const MISSION_TITLES = [
-  'Meet Marisol',
-  'The Dock Drop',
-  'Heat on the Keys',
-];
+  var defs = [
+    {
+      title: 'MEET MARISOL',
+      objective: 'Meet Marisol at Coral Bait & Tackle',
+      hint: 'Walk with WASD, get in a car with E. Follow the yellow beacon.',
+      target: { x: cfg.places.baitShop.x, z: cfg.places.baitShop.z },
+      reward: 50,
+      doneText: 'Marisol has work for you. +$50'
+    },
+    {
+      title: 'THE DOCK DROP',
+      objective: 'Pick up the crate at Marina Pier',
+      hint: 'Head south to the pier. The crate is not yours to open.',
+      target: { x: cfg.places.pier.x, z: 168 },
+      reward: 150,
+      doneText: 'Crate delivered to Sunset Motel. +$150'
+    },
+    {
+      title: 'HEAT ON THE KEYS',
+      objective: 'Lose the heat — reach the Old Boatyard',
+      hint: 'Three stars! The sheriff is on your tail — keep driving!',
+      target: { x: cfg.places.boatyard.x, z: cfg.places.boatyard.z },
+      reward: 300,
+      doneText: 'You slipped the sheriff. Story complete — free roam! +$300'
+    }
+  ];
 
-function missionObjective(state) {
-  const index = state.missionIndex;
-  if (index === 0) {
-    return {
-      text: 'Meet Marisol at Coral Bait & Tackle',
-      marker: { x: LANDMARKS.baitShop.x, y: LANDMARKS.baitShop.y - 60 },
-      hint: 'Follow the yellow marker. Walk with WASD, get in a car with E.',
-    };
+  function init(s) {
+    scene = s;
+    // Beacon: a tall translucent 3D cylinder marking the objective.
+    var geo = new THREE.CylinderGeometry(1.6, 1.6, 60, 16, 1, true);
+    var mat = new THREE.MeshBasicMaterial({
+      color: 0xf5d76e, transparent: true, opacity: 0.35,
+      side: THREE.DoubleSide, depthWrite: false
+    });
+    beacon = new THREE.Mesh(geo, mat);
+    beacon.position.y = 30;
+    scene.add(beacon);
+    showMission(0);
   }
-  if (index === 1 && !state.hasPackage) {
-    return {
-      text: 'Pick up the crate at Marina Pier',
-      marker: { x: LANDMARKS.marina.x, y: LANDMARKS.marina.y },
-      hint: 'Marisol needs a crate moved. No questions, good money.',
-    };
+
+  function current() {
+    return index < defs.length ? defs[index] : null;
   }
-  if (index === 1) {
-    return {
-      text: 'Deliver the crate to Sunset Motel',
-      marker: { x: LANDMARKS.motel.x, y: LANDMARKS.motel.y - 80 },
-      hint: 'Keep it quiet. The crate is not yours to open.',
-    };
+
+  // Objective and hint change with the mission step: once the crate is
+  // picked up, the goal is the delivery, not the pickup.
+  function objectiveText() {
+    var m = current();
+    if (!m) return 'Explore Coral Keys.';
+    if (index === 1 && stage === 1) return 'Deliver the crate to Sunset Motel';
+    return m.objective;
   }
+
+  function hintText() {
+    var m = current();
+    if (!m) return 'Steal a car with E. Watch the heat.';
+    if (index === 1 && stage === 1) return 'Drive it there. The crate is not yours to open.';
+    return m.hint;
+  }
+
+  function showMission(i) {
+    index = i;
+    stage = 0;
+    carryingCrate = false;
+    var m = current();
+    if (!m) {
+      if (beacon) beacon.visible = false;
+      setMessage('Free roam — Coral Keys is yours.');
+      return;
+    }
+    if (index === 2) CK.police.setWanted(3);
+    if (beacon) {
+      beacon.visible = true;
+      beacon.position.x = m.target.x;
+      beacon.position.z = m.target.z;
+    }
+  }
+
+  function setMessage(text, seconds) {
+    message = text;
+    messageUntil = performance.now() + (seconds || 4) * 1000;
+  }
+
+  function getMessage() {
+    return performance.now() < messageUntil ? message : '';
+  }
+
+  function targetPos() {
+    var m = current();
+    if (!m) return null;
+    if (index === 1 && stage === 1) {
+      return { x: cfg.places.motel.x, z: cfg.places.motel.z };
+    }
+    return m.target;
+  }
+
+  function check(player, dt) {
+    var m = current();
+    if (!m) return;
+    var t = targetPos();
+    var d = Math.hypot(player.pos.x - t.x, player.pos.z - t.z);
+    if (index === 1 && stage === 0) {
+      // Mission 2, step 1: reach the pier and pick up the crate.
+      if (d < 5) {
+        stage = 1;
+        carryingCrate = true;
+        setMessage('Crate picked up — deliver it to Sunset Motel.', 4);
+        CK.audio.pickup();
+        if (beacon) {
+          beacon.position.x = cfg.places.motel.x;
+          beacon.position.z = cfg.places.motel.z;
+        }
+      }
+      return;
+    }
+    if (d < 6) complete(player);
+  }
+
+  function complete(player) {
+    var m = current();
+    if (!m) return;
+    player.money += m.reward;
+    CK.audio.missionDone();
+    setMessage(m.doneText, 5);
+    CK.audio.pickup();
+    if (index === 1) carryingCrate = false;
+    showMission(index + 1);
+  }
+
+  function getIndex() { return index; }
+  function getStage() { return stage; }
+  function isCarrying() { return carryingCrate; }
+
+  function setIndex(i) {
+    showMission(i);
+  }
+
+  // Jump mission 2 straight to "carrying the crate" (used by the
+  // deterministic screenshot scene so the crate state is visible).
+  function pickupCrate() {
+    if (index !== 1) return;
+    stage = 1;
+    carryingCrate = true;
+    if (beacon) {
+      beacon.position.x = cfg.places.motel.x;
+      beacon.position.z = cfg.places.motel.z;
+    }
+  }
+
   return {
-    text: 'Lose the heat: reach the Old Boatyard',
-    marker: { x: LANDMARKS.hideout.x, y: LANDMARKS.hideout.y + 120 },
-    hint: 'Three stars and the whole county behind you. Run for the boatyard.',
+    init: init,
+    current: current,
+    check: check,
+    targetPos: targetPos,
+    getMessage: getMessage,
+    setMessage: setMessage,
+    getIndex: getIndex,
+    getStage: getStage,
+    isCarrying: isCarrying,
+    setIndex: setIndex,
+    pickupCrate: pickupCrate,
+    objectiveText: objectiveText,
+    hintText: hintText,
+    defs: defs
   };
-}
-
-export function currentObjective(state) {
-  if (state.missionIndex >= MISSION_TITLES.length) {
-    return { text: 'Coral Keys is yours — free roam', marker: null, hint: 'Collect shells on the beach, $10 each. Q saves your game.' };
-  }
-  return missionObjective(state);
-}
-
-export function missionTitle(state) {
-  if (state.missionIndex >= MISSION_TITLES.length) return 'Free Roam';
-  return MISSION_TITLES[state.missionIndex];
-}
-
-function finishMission(state) {
-  const reward = MISSION_REWARDS[state.missionIndex] || 0;
-  state.player.cash += reward;
-  state.message = `Mission complete: ${MISSION_TITLES[state.missionIndex]}  +$${reward}`;
-  state.messageTimer = 4;
-  state.missionIndex += 1;
-  state.hasPackage = false;
-  if (state.missionIndex >= MISSION_TITLES.length) {
-    state.storyDone = true;
-    state.message = 'Story complete! Coral Keys is yours now. +$300';
-  }
-}
-
-function closeTo(player, point, distance) {
-  return Math.hypot(player.x - point.x, player.y - point.y) < distance;
-}
-
-/** Check mission triggers after movement; true when a mission advanced. */
-export function updateMissions(state) {
-  const player = state.player;
-  const index = state.missionIndex;
-  if (index >= MISSION_TITLES.length) return false;
-
-  if (index === 0) {
-    if (closeTo(player, LANDMARKS.baitShop, 130)) {
-      finishMission(state);
-      state.message = 'Marisol: "Kai. You look hungry. Move a crate for me and eat tonight."  Mission complete +$50';
-      state.messageTimer = 5;
-      return true;
-    }
-    return false;
-  }
-
-  if (index === 1) {
-    if (!state.hasPackage && closeTo(player, LANDMARKS.marina, 130)) {
-      state.hasPackage = true;
-      state.message = 'Crate collected. Get it to Sunset Motel — quietly.';
-      state.messageTimer = 4;
-      return false;
-    }
-    if (state.hasPackage && closeTo(player, LANDMARKS.motel, 140)) {
-      finishMission(state);
-      return true;
-    }
-    return false;
-  }
-
-  // Mission 3: the heat is on from the moment it starts.
-  if (!state.mission3Started) {
-    state.mission3Started = true;
-    raiseWanted(state, 3);
-    state.message = 'Marisol: "They know, Kai. Run for the Old Boatyard, now!"';
-    state.messageTimer = 5;
-  }
-  if (closeTo(player, LANDMARKS.hideout, 150)) {
-    state.wanted = 0;
-    state.lastCrimeAt = state.elapsed;
-    finishMission(state);
-    return true;
-  }
-  return false;
-}
+})();

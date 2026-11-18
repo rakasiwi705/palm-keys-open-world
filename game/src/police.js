@@ -1,144 +1,121 @@
-// The Keys County sheriff: wanted stars, patrol cruisers that chase Kai,
-// and deputies on foot when he runs. Heat rises with crimes and cools when
-// Kai stays clean and out of sight.
-import { POLICE, WORLD } from './config.js';
-import { makeCar } from './vehicles.js';
-import { clampToWorld, collideBuildings } from './world.js';
+// Coral Keys — wanted level and police.
+// Crimes raise heat (stealing a car, shooting). Police cruisers (3D car
+// models with a light bar) spawn and chase the player. Heat cools down
+// when the player stays out of trouble. Getting caught on foot hurts.
+var CK = window.CK || {};
+CK.police = (function () {
+  var wanted = 0;
+  var heat = 0; // 0..100, drives the wanted stars
+  var cruisers = [];
+  var scene = null;
+  var sirenOn = false;
 
-export const EVENT_BUSTED = 1;
-export const EVENT_WANTED_UP = 2;
-
-/** Raise the heat by one star (at most three) and note when it happened. */
-export function raiseWanted(state, amount) {
-  const before = state.wanted;
-  state.wanted = Math.min(3, state.wanted + amount);
-  state.lastCrimeAt = state.elapsed;
-  return state.wanted > before ? EVENT_WANTED_UP : 0;
-}
-
-/** A cruiser enters at the map edge, on a road, aimed roughly at Kai. */
-function spawnCruiser(state, random) {
-  const player = state.player;
-  const edge = Math.floor(random() * 4);
-  let x;
-  let y;
-  if (edge === 0) { x = player.x; y = 60; }
-  else if (edge === 1) { x = player.x; y = WORLD.height - 60; }
-  else if (edge === 2) { x = 60; y = player.y; }
-  else { x = WORLD.width - 60; y = player.y; }
-  x = Math.max(80, Math.min(WORLD.width - 80, x));
-  y = Math.max(80, Math.min(WORLD.height - 80, y));
-  const car = makeCar(x, y, Math.atan2(player.y - y, player.x - x), '#20242e', 'police', 'police');
-  car.siren = true;
-  car.chaseSide = random() < 0.5 ? -1 : 1;
-  state.cars.push(car);
-  return car;
-}
-
-/**
- * A cruiser steers toward its target with a simple pursuit turn. It aims at
- * a point beside the target, not straight at its nose: a cruiser driving
- * head-on into its quarry just locks bumpers with it, while one pulling
- * alongside can ram it off the road.
- */
-function chaseTarget(car, target, dt, city) {
-  const heading = target.angle !== undefined ? target.angle : 0;
-  const side = car.chaseSide || 1;
-  const aimX = target.x + Math.cos(heading + (Math.PI / 2) * side) * 70;
-  const aimY = target.y + Math.sin(heading + (Math.PI / 2) * side) * 70;
-  const dist = Math.hypot(target.x - car.x, target.y - car.y);
-  const desired = Math.atan2(aimY - car.y, aimX - car.x);
-  let diff = desired - car.angle;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  const steer = Math.max(-1, Math.min(1, diff * 2));
-  // The shared car physics, at full throttle, steered toward the target.
-  const onRoad = city.isOnRoad(car.x, car.y);
-  const grip = onRoad ? 1 : 0.45;
-  // Ease off once alongside the target instead of ramming it forever.
-  const throttle = dist < 90 ? 0.3 : 1;
-  car.speed += POLICE.accel * grip * throttle * dt;
-  car.speed -= car.speed * 0.4 * dt;
-  if (car.speed > POLICE.maxSpeed * grip) car.speed = POLICE.maxSpeed * grip;
-  car.angle += steer * POLICE.turnRate * Math.min(1, Math.abs(car.speed) / 140) * dt;
-  car.x += Math.cos(car.angle) * car.speed * dt;
-  car.y += Math.sin(car.angle) * car.speed * dt;
-  collideBuildings(city, car);
-  clampToWorld(car, 24);
-}
-
-export function updatePolice(state, dt, random) {
-  const player = state.player;
-  const target = player.inCar || player;
-  const cruisers = state.cars.filter((c) => c.driver === 'police' && !c.wrecked);
-  const wantedCars = state.wanted === 0 ? 0 : Math.min(POLICE.maxCars, state.wanted + 1);
-
-  // Keep the right number of cruisers on the road while Kai is wanted.
-  if (cruisers.length < wantedCars && state.spawnTimer <= 0) {
-    spawnCruiser(state, random);
-    state.spawnTimer = 1.2;
+  function init(s) {
+    scene = s;
   }
-  if (state.spawnTimer > 0) state.spawnTimer -= dt;
 
-  // Cruisers chase; when Kai is on foot and one gets close, a deputy steps
-  // out and chases on foot instead.
-  for (const cruiser of cruisers) {
-    chaseTarget(cruiser, target, dt, state.city);
-    const dist = Math.hypot(target.x - cruiser.x, target.y - cruiser.y);
-    if (!player.inCar && dist < 130 && state.officers.length < 2 && state.officerTimer <= 0) {
-      state.officers.push({
-        x: cruiser.x, y: cruiser.y, vx: 0, vy: 0, radius: 12,
-        shirt: '#20242e', speed: 235, target: null, wait: 0, panicked: 0, walkCycle: 0, officer: true,
+  function addHeat(amount) {
+    heat = Math.min(100, heat + amount);
+    var level = heat < 12 ? 0 : heat < 40 ? 1 : heat < 70 ? 2 : 3;
+    if (level > wanted) {
+      wanted = level;
+      spawnCruisers();
+      return true;
+    }
+    return false;
+  }
+
+  function setWanted(level) {
+    wanted = level;
+    heat = [0, 20, 50, 85][level] || 0;
+    spawnCruisers();
+  }
+
+  function spawnCruisers() {
+    // One cruiser per wanted star, spawned on roads near the player.
+    var player = CK.player.getState();
+    while (cruisers.length < wanted) {
+      var angle = Math.random() * Math.PI * 2;
+      var x = player.pos.x + Math.cos(angle) * 45;
+      var z = player.pos.z + Math.sin(angle) * 45;
+      var cl = CK.world.clampToCity(x, z);
+      var car = CK.vehicles.createCar(cl.x, cl.z, 0, {
+        police: true, driver: 'police', color: 0xf2f2f2, name: 'cruiser'
       });
-      state.officerTimer = 3;
+      scene.add(car.mesh);
+      cruisers.push(car);
     }
-  }
-  if (state.officerTimer > 0) state.officerTimer -= dt;
-
-  // Deputies run Kai down and rough him up on contact.
-  for (const officer of state.officers) {
-    const dx = player.x - officer.x;
-    const dy = player.y - officer.y;
-    const d = Math.hypot(dx, dy);
-    if (d > 1) {
-      officer.vx = (dx / d) * officer.speed;
-      officer.vy = (dy / d) * officer.speed;
+    while (cruisers.length > wanted) {
+      var old = cruisers.pop();
+      CK.vehicles.removeCar(old, scene);
     }
-    officer.x += officer.vx * dt;
-    officer.y += officer.vy * dt;
-    officer.walkCycle += dt * 8;
+    if (wanted > 0) { CK.audio.startSiren(); sirenOn = true; }
+    else { CK.audio.stopSiren(); sirenOn = false; }
   }
 
-  // Heat cools: thirty quiet seconds with no cruiser nearby drops one star.
-  if (state.wanted > 0 && state.elapsed - state.lastCrimeAt > 30) {
-    const nearest = cruisers.reduce((best, c) => Math.min(best, Math.hypot(c.x - target.x, c.y - target.y)), Infinity);
-    if (nearest > 500) {
-      state.wanted -= 1;
-      state.lastCrimeAt = state.elapsed;
+  function update(dt, player) {
+    // Heat cools slowly when no new crime happens.
+    if (heat > 0) {
+      heat = Math.max(0, heat - dt * 1.6);
+      var level = heat < 12 ? 0 : heat < 40 ? 1 : heat < 70 ? 2 : 3;
+      if (level !== wanted) {
+        wanted = level;
+        spawnCruisers();
+      }
     }
+    // Chase: steer toward the player, drive fast, flash the light bar.
+    var t = performance.now() * 0.006;
+    cruisers.forEach(function (car) {
+      var dx = player.pos.x - car.pos.x;
+      var dz = player.pos.z - car.pos.z;
+      var dist = Math.hypot(dx, dz);
+      var wantYaw = Math.atan2(-dx, -dz);
+      var diff = wantYaw - car.yaw;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      car.yaw += Math.max(-2.2 * dt, Math.min(2.2 * dt, diff));
+      var targetSpeed = dist > 60 ? 34 : 26;
+      car.speed += (targetSpeed - car.speed) * dt * 0.8;
+      var nx = car.pos.x - Math.sin(car.yaw) * car.speed * dt;
+      var nz = car.pos.z - Math.cos(car.yaw) * car.speed * dt;
+      if (!CK.world.collideCircle(nx, nz, 2.0)) {
+        car.pos.x = nx; car.pos.z = nz;
+      } else {
+        car.yaw += 0.6 * dt; // nudge around obstacles
+      }
+      var cl = CK.world.clampToCity(car.pos.x, car.pos.z);
+      car.pos.x = cl.x; car.pos.z = cl.z;
+      CK.vehicles.syncMesh(car);
+      var red = car.mesh.userData.lightRed;
+      var blue = car.mesh.userData.lightBlue;
+      if (red) red.visible = Math.sin(t) > 0;
+      if (blue) blue.visible = Math.sin(t) <= 0;
+      // Caught on foot: the cruiser rams the player.
+      if (!player.inCar && dist < 2.4) {
+        CK.player.hurt(25 * dt);
+      }
+      // Ram the player's car: damage + slow it.
+      if (player.inCar && dist < 3.4) {
+        player.inCar.speed *= 0.92;
+        CK.player.hurt(6 * dt);
+      }
+    });
+    CK.audio.engine(player.inCar ? Math.abs(player.inCar.speed) / 42 : 0);
   }
 
-  // No wanted level: cruisers and deputies stand down and drive off.
-  if (state.wanted === 0) {
-    for (const cruiser of cruisers) cruiser.driver = 'traffic';
-    state.officers.length = 0;
-  }
-}
+  function getWanted() { return wanted; }
+  function getHeat() { return heat; }
+  function allCruisers() { return cruisers; }
+  function isSirenOn() { return sirenOn; }
 
-/** A cruiser ramming Kai's car, or a deputy catching him on foot. */
-export function policeContactDamage(state) {
-  const player = state.player;
-  const target = player.inCar || player;
-  let damage = 0;
-  for (const car of state.cars) {
-    if (car.driver !== 'police' || car.wrecked) continue;
-    const d = Math.hypot(car.x - target.x, target.y - target.y);
-    if (d < car.radius + target.radius + 4 && Math.abs(car.speed) > 60) damage += 6;
-  }
-  if (!player.inCar) {
-    for (const officer of state.officers) {
-      if (Math.hypot(officer.x - player.x, officer.y - player.y) < 30) damage += 12;
-    }
-  }
-  return damage;
-}
+  return {
+    init: init,
+    addHeat: addHeat,
+    setWanted: setWanted,
+    update: update,
+    getWanted: getWanted,
+    getHeat: getHeat,
+    allCruisers: allCruisers,
+    isSirenOn: isSirenOn
+  };
+})();

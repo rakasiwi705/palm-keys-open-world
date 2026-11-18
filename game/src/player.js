@@ -1,102 +1,134 @@
-// Kai Marlin on foot: walking, facing, shooting, and climbing in and out
-// of cars. Driving itself lives in vehicles.js.
-import { CAR, PLAYER } from './config.js';
-import { clampToWorld, collideBuildings } from './world.js';
+// Coral Keys — first-person player.
+// The camera sits at the character's eye. WASD walks, Shift runs, Space
+// jumps, E enters/exits the nearest car, F shoots (raycast from the camera).
+var CK = window.CK || {};
+CK.player = (function () {
+  var cfg = CK.config;
+  var state = null; // set by main.js: { pos: THREE.Vector3, yaw, pitch, ... }
 
-export function createPlayer(x, y) {
+  function create() {
+    var s = CK.world.playerSpawn;
+    return {
+      pos: new THREE.Vector3(s.x, 0, s.z),
+      velY: 0,
+      yaw: s.yaw,
+      pitch: 0,
+      onGround: true,
+      inCar: null,
+      health: 100,
+      money: cfg.startMoney,
+      speed: 0
+    };
+  }
+
+  function forwardVector(yaw) {
+    return { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+  }
+
+  function update(dt, input, world, vehicles, onShoot) {
+    var p = state;
+    if (!p) return;
+    if (p.inCar) return; // driving is handled by vehicles.js
+
+    // Mouse look.
+    var look = input.consumeLook();
+    p.yaw -= look.dx * 0.0023;
+    p.pitch -= look.dy * 0.0023;
+    p.pitch = Math.max(-1.45, Math.min(1.45, p.pitch));
+
+    // Movement relative to facing.
+    var fwd = forwardVector(p.yaw);
+    var right = { x: -fwd.z, z: fwd.x };
+    var mx = 0, mz = 0;
+    if (input.isDown('KeyW') || input.isDown('ArrowUp')) { mx += fwd.x; mz += fwd.z; }
+    if (input.isDown('KeyS') || input.isDown('ArrowDown')) { mx -= fwd.x; mz -= fwd.z; }
+    if (input.isDown('KeyD') || input.isDown('ArrowRight')) { mx += right.x; mz += right.z; }
+    if (input.isDown('KeyA') || input.isDown('ArrowLeft')) { mx -= right.x; mz -= right.z; }
+    var len = Math.sqrt(mx * mx + mz * mz);
+    var speed = (input.isDown('ShiftLeft') || input.isDown('ShiftRight')) ? cfg.runSpeed : cfg.walkSpeed;
+    p.speed = len > 0 ? speed : 0;
+    if (len > 0) {
+      mx /= len; mz /= len;
+      var nx = p.pos.x + mx * speed * dt;
+      var nz = p.pos.z + mz * speed * dt;
+      var hit = world.collideCircle(nx, nz, cfg.playerRadius);
+      if (!hit) {
+        p.pos.x = nx; p.pos.z = nz;
+      } else {
+        // Slide along the wall: try each axis separately.
+        if (!world.collideCircle(nx, p.pos.z, cfg.playerRadius)) p.pos.x = nx;
+        else if (!world.collideCircle(p.pos.x, nz, cfg.playerRadius)) p.pos.z = nz;
+      }
+      var cl = world.clampToCity(p.pos.x, p.pos.z);
+      p.pos.x = cl.x; p.pos.z = cl.z;
+    }
+
+    // Jump + gravity.
+    if (input.isDown('Space') && p.onGround) {
+      p.velY = cfg.jumpSpeed;
+      p.onGround = false;
+    }
+    if (!p.onGround) {
+      p.velY -= cfg.gravity * dt;
+      p.pos.y += p.velY * dt;
+      if (p.pos.y <= 0) { p.pos.y = 0; p.velY = 0; p.onGround = true; }
+    }
+
+    // Shoot.
+    if (input.wasPressed('KeyF') && onShoot) onShoot();
+  }
+
+  function applyCamera(camera) {
+    var p = state;
+    if (!p) return;
+    if (p.inCar) return; // vehicles.js positions the camera while driving
+    var bob = (p.speed > 0 && p.onGround) ? Math.sin(performance.now() * 0.012) * 0.05 : 0;
+    camera.position.set(p.pos.x, cfg.eyeHeight + p.pos.y + bob, p.pos.z);
+    camera.rotation.order = 'YXZ';
+    camera.rotation.y = p.yaw;
+    camera.rotation.x = p.pitch;
+    camera.rotation.z = 0;
+  }
+
+  function enterCar(car) {
+    state.inCar = car;
+    car.driver = 'player';
+  }
+
+  function exitCar() {
+    var car = state.inCar;
+    if (!car) return null;
+    state.inCar = null;
+    car.driver = null;
+    // Step out to the left of the car.
+    var side = { x: Math.cos(car.yaw), z: -Math.sin(car.yaw) };
+    state.pos.set(car.pos.x + side.x * 2.2, 0, car.pos.z + side.z * 2.2);
+    state.yaw = car.yaw;
+    return car;
+  }
+
+  function hurt(amount) {
+    state.health = Math.max(0, state.health - amount);
+    return state.health;
+  }
+
+  function heal(amount) {
+    state.health = Math.min(100, state.health + amount);
+  }
+
+  function setState(s) { state = s; }
+  function getState() { return state; }
+
   return {
-    x, y, vx: 0, vy: 0, radius: PLAYER.radius,
-    facing: 0, // radians, the direction Kai is looking
-    health: PLAYER.maxHealth,
-    cash: 25,
-    inCar: null, // the car Kai is driving, or null while on foot
-    hurtTimer: 0,
-    walkCycle: 0,
+    create: create,
+    setState: setState,
+    getState: getState,
+    update: update,
+    applyCamera: applyCamera,
+    enterCar: enterCar,
+    exitCar: exitCar,
+    hurt: hurt,
+    heal: heal,
+    forwardVector: forwardVector
   };
-}
-
-/** Walk with the WASD axes; friction stops Kai when no key is held down. */
-export function updatePlayerOnFoot(player, axes, dt, city) {
-  const ax = axes.x;
-  const ay = axes.y;
-  const len = Math.hypot(ax, ay);
-  if (len > 0) {
-    player.vx += (ax / len) * PLAYER.accel * dt;
-    player.vy += (ay / len) * PLAYER.accel * dt;
-    player.facing = Math.atan2(ay, ax);
-    player.walkCycle += dt * 10;
-  }
-  const speed = Math.hypot(player.vx, player.vy);
-  if (speed > PLAYER.walkSpeed) {
-    player.vx = (player.vx / speed) * PLAYER.walkSpeed;
-    player.vy = (player.vy / speed) * PLAYER.walkSpeed;
-  } else if (len === 0 && speed > 0) {
-    const drop = PLAYER.friction * dt;
-    if (speed <= drop) { player.vx = 0; player.vy = 0; }
-    else { player.vx -= (player.vx / speed) * drop; player.vy -= (player.vy / speed) * drop; }
-  }
-  player.x += player.vx * dt;
-  player.y += player.vy * dt;
-  collideBuildings(city, player);
-  clampToWorld(player, 20);
-  if (player.hurtTimer > 0) player.hurtTimer -= dt;
-}
-
-/** The closest car Kai can climb into — parked, traffic or police. */
-export function nearestEnterableCar(player, cars, maxDistance) {
-  let best = null;
-  let bestDistance = maxDistance;
-  for (const car of cars) {
-    if (car.wrecked) continue;
-    const d = Math.hypot(car.x - player.x, car.y - player.y);
-    if (d < bestDistance) { bestDistance = d; best = car; }
-  }
-  return best;
-}
-
-/** Climb into a car: Kai disappears inside it and drives from then on. */
-export function enterCar(player, car) {
-  player.inCar = car;
-  car.driver = 'player';
-  player.vx = 0;
-  player.vy = 0;
-  return car;
-}
-
-/** Step out beside the car, on the side away from the road centre. */
-export function exitCar(player, car) {
-  const side = Math.PI / 2;
-  player.x = car.x + Math.cos(car.angle + side) * 48;
-  player.y = car.y + Math.sin(car.angle + side) * 48;
-  player.vx = 0;
-  player.vy = 0;
-  player.inCar = null;
-  car.driver = 'parked';
-  clampToWorld(player, 20);
-}
-
-/** One pistol round in the facing direction. Returns the bullet, or null. */
-export function fireBullet(player) {
-  return {
-    x: player.x + Math.cos(player.facing) * 22,
-    y: player.y + Math.sin(player.facing) * 22,
-    vx: Math.cos(player.facing) * 700,
-    vy: Math.sin(player.facing) * 700,
-    life: 0.9,
-    from: 'player',
-  };
-}
-
-/** Hurt Kai; returns true when his health reaches zero. */
-export function damagePlayer(player, amount) {
-  if (player.hurtTimer > 0) return false;
-  player.health -= amount;
-  player.hurtTimer = 0.6;
-  if (player.health <= 0) {
-    player.health = 0;
-    return true;
-  }
-  return false;
-}
-
-export { CAR };
+})();

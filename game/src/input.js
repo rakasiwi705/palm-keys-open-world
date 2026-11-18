@@ -1,77 +1,76 @@
-// Keyboard input for Coral Keys. Held keys steer and drive; one-shot presses
-// (enter a car, shoot, pause, save) are queued as flags and taken once by the
-// loop, so a press between two frames is never lost or counted twice.
+// Coral Keys — keyboard + mouse input for FPS play.
+// Pointer lock for mouse look; in screenshot mode the camera is driven by
+// code instead of the mouse.
+var CK = window.CK || {};
+CK.input = (function () {
+  var keys = {};
+  var lookDX = 0;
+  var lookDY = 0;
+  var locked = false;
+  var shotMode = false;
+  var pressed = {}; // edge-triggered keys, consumed once per frame
 
-export const ACTION_ENTER_CAR = 1;
-export const ACTION_SHOOT = 2;
-export const ACTION_PAUSE = 4;
-export const ACTION_CONFIRM = 8;
-export const ACTION_SAVE = 16;
+  function isDown(code) { return !!keys[code]; }
 
-const UP = new Set(['ArrowUp', 'KeyW']);
-const DOWN = new Set(['ArrowDown', 'KeyS']);
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-
-export function createInput(target) {
-  const held = { up: false, down: false, left: false, right: false };
-  let actions = 0;
-
-  function queue(event, flag) {
-    if (!event.repeat) actions |= flag;
-    event.preventDefault();
+  function wasPressed(code) {
+    if (pressed[code]) { pressed[code] = false; return true; }
+    return false;
   }
 
-  window.addEventListener('keydown', (event) => {
-    if (UP.has(event.code)) held.up = true;
-    else if (DOWN.has(event.code)) held.down = true;
-    else if (LEFT.has(event.code)) held.left = true;
-    else if (RIGHT.has(event.code)) held.right = true;
-    else if (event.code === 'KeyE') queue(event, ACTION_ENTER_CAR);
-    else if (event.code === 'KeyF') queue(event, ACTION_SHOOT);
-    else if (event.code === 'KeyP' || event.code === 'Escape') queue(event, ACTION_PAUSE);
-    else if (event.code === 'Space' || event.code === 'Enter') queue(event, ACTION_CONFIRM);
-    else if (event.code === 'KeyQ') queue(event, ACTION_SAVE);
-    else return;
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    if (UP.has(event.code)) held.up = false;
-    else if (DOWN.has(event.code)) held.down = false;
-    else if (LEFT.has(event.code)) held.left = false;
-    else if (RIGHT.has(event.code)) held.right = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go on blur.
-  window.addEventListener('blur', () => {
-    held.up = false;
-    held.down = false;
-    held.left = false;
-    held.right = false;
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
-  });
+  function consumeLook() {
+    var d = { dx: lookDX, dy: lookDY };
+    lookDX = 0; lookDY = 0;
+    return d;
+  }
+
+  function isLocked() { return locked; }
+  function isShotMode() { return shotMode; }
+
+  function setShotMode(v) { shotMode = v; }
+
+  function requestLock(el) {
+    if (shotMode) return;
+    try {
+      if (el.requestPointerLock) el.requestPointerLock();
+    } catch (e) { /* pointer lock unavailable */ }
+  }
+
+  function init(canvas) {
+    window.addEventListener('keydown', function (e) {
+      if (e.repeat) return;
+      keys[e.code] = true;
+      pressed[e.code] = true;
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].indexOf(e.code) >= 0) {
+        e.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', function (e) {
+      keys[e.code] = false;
+    });
+    window.addEventListener('blur', function () {
+      keys = {};
+    });
+    document.addEventListener('pointerlockchange', function () {
+      locked = document.pointerLockElement === canvas;
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!locked) return;
+      lookDX += e.movementX || 0;
+      lookDY += e.movementY || 0;
+    });
+    canvas.addEventListener('click', function () {
+      requestLock(canvas);
+    });
+  }
 
   return {
-    /** Steering axes, each -1, 0 or 1. */
-    axes() {
-      return {
-        x: (held.right ? 1 : 0) - (held.left ? 1 : 0),
-        y: (held.down ? 1 : 0) - (held.up ? 1 : 0),
-      };
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
-    /** For scripted scenes: pretend these keys are held (used by shots). */
-    setHeld(next) {
-      held.up = !!next.up;
-      held.down = !!next.down;
-      held.left = !!next.left;
-      held.right = !!next.right;
-    },
+    init: init,
+    isDown: isDown,
+    wasPressed: wasPressed,
+    consumeLook: consumeLook,
+    isLocked: isLocked,
+    isShotMode: isShotMode,
+    setShotMode: setShotMode,
+    requestLock: requestLock
   };
-}
+})();

@@ -1,41 +1,55 @@
-// Save and load for Coral Keys: one JSON blob in localStorage. Saving never
-// touches the server and never needs a network request.
-import { SAVE_KEY } from './config.js';
+// Coral Keys — save / load via localStorage.
+var CK = window.CK || {};
+CK.save = (function () {
+  var KEY = 'coral-keys-save-v1';
 
-export function saveGame(state) {
-  try {
-    const data = {
-      v: 1, // save format version, so an older save can be recognised later
-      cash: state.player.cash,
-      health: state.player.health,
-      missionIndex: state.missionIndex,
-      hasPackage: state.hasPackage,
-      x: state.player.x,
-      y: state.player.y,
-      clock: state.clock,
-      day: state.day,
-      shells: state.shellsCollected,
-      storyDone: state.storyDone,
-    };
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  function write(player) {
+    try {
+      var data = {
+        x: player.pos.x,
+        z: player.pos.z,
+        yaw: player.yaw,
+        health: player.health,
+        money: player.money,
+        mission: CK.missions.getIndex(),
+        wanted: CK.police.getWanted(),
+        savedAt: Date.now()
+      };
+      localStorage.setItem(KEY, JSON.stringify(data));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function read() {
+    try {
+      var raw = localStorage.getItem(KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function has() {
+    try { return !!localStorage.getItem(KEY); } catch (e) { return false; }
+  }
+
+  function clear() {
+    try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
+  }
+
+  function apply(player, data) {
+    if (!data) return false;
+    player.pos.set(data.x, 0, data.z);
+    player.yaw = data.yaw;
+    player.health = data.health;
+    player.money = data.money;
+    CK.missions.setIndex(data.mission || 0);
+    if (data.wanted) CK.police.setWanted(data.wanted);
     return true;
-  } catch {
-    return false;
   }
-}
 
-export function loadGame() {
-  try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
-    return data;
-  } catch {
-    return null;
-  }
-}
-
-export function hasSave() {
-  return loadGame() !== null;
-}
+  return { write: write, read: read, has: has, clear: clear, apply: apply };
+})();

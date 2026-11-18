@@ -1,19 +1,89 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Coral Keys — an open-world crime story</title>
+<title>Coral Keys — an original FPS open-world crime game</title>
+<link rel="icon" href="data:,">
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1a24; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* A live region for screen readers; the canvas itself carries the game. */
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #101418; font-family: Arial, Helvetica, sans-serif; }
+  #game-canvas { display: block; width: 100%; height: 100%; }
+  #hud { position: fixed; inset: 0; pointer-events: none; display: none; color: #fff; }
+  .hud-box { background: rgba(0, 0, 0, 0.55); border-radius: 6px; padding: 8px 12px; }
+  .hud-top-left { position: absolute; top: 16px; left: 16px; max-width: 380px; font-size: 15px; line-height: 1.35; }
+  .hud-top-left b { color: #f5d76e; font-size: 16px; letter-spacing: 1px; }
+  .hud-top-left .hint { color: #c8c8c8; font-size: 13px; }
+  .hud-top-center { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); width: 260px; }
+  .health-bar { position: relative; height: 22px; background: rgba(0,0,0,0.6); border: 1px solid #fff; border-radius: 4px; overflow: hidden; }
+  .health-fill { height: 100%; background: #37b24d; }
+  .health-bar span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: bold; letter-spacing: 1px; }
+  .hud-top-right { position: absolute; top: 16px; right: 16px; text-align: right; min-width: 110px; }
+  .clock-time { font-size: 22px; font-weight: bold; }
+  .clock-day { font-size: 13px; color: #e8e8e8; }
+  .clock-stars { font-size: 20px; color: #f5d76e; letter-spacing: 2px; }
+  .clock-money { font-size: 16px; color: #7be495; font-weight: bold; }
+  .crosshair { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 28px; font-weight: bold; color: rgba(255,255,255,0.85); text-shadow: 0 0 4px #000; }
+  .hud-message { position: absolute; bottom: 150px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.65); padding: 8px 18px; border-radius: 6px; font-size: 15px; max-width: 80%; text-align: center; }
+  .hud-message:empty { display: none; }
+  .hud-crate { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); background: rgba(180,140,20,0.85); color: #fff; font-weight: bold; letter-spacing: 1px; padding: 6px 16px; border-radius: 20px; font-size: 14px; display: none; }
+  .hud-controls { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.55); padding: 6px 14px; border-radius: 6px; font-size: 13px; white-space: nowrap; }
+  .hud-bottom-right { position: absolute; bottom: 16px; right: 16px; font-size: 14px; }
+  .minimap-wrap { position: absolute; bottom: 16px; left: 16px; width: 180px; height: 180px; }
+  .minimap-wrap canvas { width: 180px; height: 180px; border-radius: 50%; border: 3px solid #a55eea; box-shadow: 0 0 0 2px rgba(0,0,0,0.5); background: #2a2a30; }
+  .minimap-label { position: absolute; bottom: -2px; left: 0; right: 0; text-align: center; font-size: 12px; font-weight: bold; letter-spacing: 2px; text-shadow: 0 1px 3px #000; }
+  .screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(8, 14, 20, 0.72); color: #fff; text-align: center; z-index: 10; }
+  .screen h1 { font-size: 64px; letter-spacing: 6px; color: #f5d76e; text-shadow: 0 3px 12px #000; }
+  .screen h2 { font-size: 40px; letter-spacing: 4px; color: #f5d76e; }
+  .screen p { max-width: 560px; margin: 14px 0; font-size: 16px; line-height: 1.5; color: #e8e8e8; }
+  .screen button { pointer-events: auto; cursor: pointer; margin-top: 14px; padding: 12px 34px; font-size: 18px; font-weight: bold; letter-spacing: 1px; color: #10202e; background: #f5d76e; border: none; border-radius: 8px; }
+  .screen button:hover { background: #ffe28a; }
+  .screen .keys { font-size: 14px; color: #c8c8c8; margin-top: 18px; line-height: 1.7; }
+  #pause-screen, #end-screen { display: none; }
+  #status-line { position: fixed; left: 16px; bottom: 210px; color: #fff; font-size: 13px; text-shadow: 0 1px 3px #000; pointer-events: none; z-index: 5; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Coral Keys: an open-world crime game. Walk with WASD, climb into a car with E, shoot with F, pause with P."></canvas>
-<p id="status" role="status" aria-live="polite"></p>
-<script type="module" src="./src/main.js"></script>
+<canvas id="game-canvas"></canvas>
+<div id="hud"></div>
+<div id="status-line"></div>
+
+<div id="title-screen" class="screen">
+  <h1>CORAL KEYS</h1>
+  <p>An original first-person open-world crime game. Explore a sun-soaked tropical coastal town on foot and by car, outrun the sheriff, and finish all three missions.</p>
+  <button id="start-btn">START GAME</button>
+  <div class="keys">Mouse — look &nbsp;·&nbsp; WASD — walk / drive &nbsp;·&nbsp; Shift — run<br>
+  Space — jump &nbsp;·&nbsp; E — enter / exit car &nbsp;·&nbsp; F — shoot<br>
+  P — pause &nbsp;·&nbsp; Q — save &nbsp;·&nbsp; M — mute &nbsp;·&nbsp; N — new game</div>
+</div>
+
+<div id="pause-screen" class="screen">
+  <h2>PAUSED</h2>
+  <p>Take a breath. Coral Keys will wait.</p>
+  <button id="resume-btn">RESUME</button>
+  <button id="newgame-btn">NEW GAME</button>
+</div>
+
+<div id="end-screen" class="screen">
+  <h2 id="end-title">BUSTED</h2>
+  <p id="end-text"></p>
+  <button id="continue-btn">KEEP ROAMING</button>
+  <button id="restart-btn">PLAY AGAIN</button>
+</div>
+
+<script src="vendor/three.min.js"></script>
+<script src="src/config.js"></script>
+<script src="src/audio.js"></script>
+<script src="src/world.js"></script>
+<script src="src/input.js"></script>
+<script src="src/player.js"></script>
+<script src="src/vehicles.js"></script>
+<script src="src/traffic.js"></script>
+<script src="src/police.js"></script>
+<script src="src/missions.js"></script>
+<script src="src/hud.js"></script>
+<script src="src/save.js"></script>
+<script src="src/shots.js"></script>
+<script src="src/main.js"></script>
 </body>
 </html>
