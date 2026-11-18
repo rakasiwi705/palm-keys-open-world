@@ -1,141 +1,322 @@
-// Drawing only: the world's state and the current screen in, pixels out. The 1280x720 playfield
-// is scaled to fit the window and centred, the margin filled with the backdrop colour. Flat
-// rectangles and circles, canvas text for the HUD and the panels. Text that holds a number is
-// rebuilt only when the number changes, so a frame allocates nothing.
-import { FIELD, FONT, LIVES, PALETTE } from './config.js';
-import { KIND_COIN } from './world.js';
+// Drawing only: the game state and the current screen in, pixels out. The
+// camera follows Kai through the 3200x2400 town; the 1280x720 view is scaled
+// to fit the window. All art is drawn with canvas shapes — no images, no
+// network, nothing borrowed.
+import { BEACH_TOP, H_ROADS, PALETTE, ROAD_WIDTH, SEA_TOP, V_ROADS, VIEW, WORLD } from './config.js';
+import { currentObjective } from './missions.js';
 
 export const SCREEN_TITLE = 'title';
 export const SCREEN_PLAY = 'play';
 export const SCREEN_PAUSED = 'paused';
-export const SCREEN_OVER = 'over';
+export const SCREEN_BUSTED = 'busted';
+export const SCREEN_COMPLETE = 'complete';
 
-/** The panel's width; its height grows with its lines: room for the title, the lines and the prompt. */
-const PANEL = { width: 600, top: 134, line: 34, bottom: 70 };
-const LIFE_SIZE = 20;
-const LIFE_GAP = 8;
+const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
-function cachedLabel(prefix) {
-  let value = -1;
-  let text = '';
-  return function label(next) {
-    if (next !== value) {
-      value = next;
-      text = prefix + next;
-    }
-    return text;
-  };
+function text(ctx, value, x, y, size, color, align, bold) {
+  ctx.font = `${bold ? '700 ' : ''}${size}px ${FONT}`;
+  ctx.fillStyle = color;
+  ctx.textAlign = align || 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(value, x, y);
 }
 
 export function createRenderer(canvas) {
-  const context = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d');
   const view = { scale: 1, x: 0, y: 0 };
-  const scoreLabel = cachedLabel('Score ');
-  const levelLabel = cachedLabel('Level ');
-  const finalLabel = cachedLabel('Score ');
-  const bestLabel = cachedLabel('Best ');
 
+  // Size the backing store from the canvas's own CSS box, so the 1280x720
+  // view is always fully inside the visible area, whatever the window is.
   function resize() {
     const ratio = window.devicePixelRatio || 1;
-    const width = Math.round(window.innerWidth * ratio);
-    const height = Math.round(window.innerHeight * ratio);
-    canvas.width = width;
-    canvas.height = height;
-    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
-    view.x = (width - FIELD.width * view.scale) / 2;
-    view.y = (height - FIELD.height * view.scale) / 2;
+    const cssW = canvas.clientWidth || window.innerWidth;
+    const cssH = canvas.clientHeight || window.innerHeight;
+    canvas.width = Math.round(cssW * ratio);
+    canvas.height = Math.round(cssH * ratio);
+    view.scale = Math.min(canvas.width / VIEW.width, canvas.height / VIEW.height);
+    view.x = (canvas.width - VIEW.width * view.scale) / 2;
+    view.y = (canvas.height - VIEW.height * view.scale) / 2;
   }
 
-  const fonts = new Map();
-  function text(value, x, y, size, color, align) {
-    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-    context.font = fonts.get(size);
-    context.fillStyle = color;
-    context.textAlign = align;
-    context.fillText(value, x, y);
-  }
-
-  function drawField(state) {
-    context.fillStyle = PALETTE.sky;
-    context.fillRect(0, 0, FIELD.width, FIELD.height);
-    context.fillStyle = PALETTE.ground;
-    context.fillRect(0, FIELD.groundY, FIELD.width, FIELD.height - FIELD.groundY);
-
-    const items = state.items;
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      if (!item.active) continue;
-      if (item.kind === KIND_COIN) {
-        context.fillStyle = PALETTE.coin;
-        context.beginPath();
-        context.arc(item.x + item.width / 2, item.y + item.height / 2, item.width / 2, 0, Math.PI * 2);
-        context.fill();
-      } else {
-        context.fillStyle = PALETTE.block;
-        context.fillRect(item.x, item.y, item.width, item.height);
+  function drawGround(state) {
+    // Grass with a faint checker so the ground reads as lawns, not flat colour.
+    ctx.fillStyle = PALETTE.grass;
+    ctx.fillRect(0, 0, WORLD.width, WORLD.height);
+    ctx.fillStyle = PALETTE.grassDark;
+    const tile = 160;
+    for (let ty = 0; ty < WORLD.height / tile; ty += 1) {
+      for (let tx = 0; tx < WORLD.width / tile; tx += 1) {
+        if ((tx + ty) % 2 === 0) ctx.fillRect(tx * tile, ty * tile, tile, tile);
       }
     }
+    // Beach and sea along the south edge.
+    ctx.fillStyle = PALETTE.sand;
+    ctx.fillRect(0, BEACH_TOP, WORLD.width, SEA_TOP - BEACH_TOP);
+    ctx.fillStyle = PALETTE.sea;
+    ctx.fillRect(0, SEA_TOP, WORLD.width, WORLD.height - SEA_TOP);
+    ctx.fillStyle = PALETTE.seaDeep;
+    for (let x = 0; x < WORLD.width; x += 90) {
+      ctx.fillRect(x + ((state.elapsed * 20) % 90), SEA_TOP + 30 + ((x / 90) % 3) * 40, 46, 5);
+    }
+    // Marina pier on the east side.
+    ctx.fillStyle = '#8a6f4d';
+    ctx.fillRect(2920, 1900, 220, 26);
+    ctx.fillStyle = '#6f5a3c';
+    for (let x = 2930; x < 3140; x += 24) ctx.fillRect(x, 1900, 4, 26);
+  }
 
-    const player = state.player;
-    // Blink while invulnerable after a hit: hidden on every other tenth of a second.
-    if (player.invulnerable === 0 || Math.floor(player.invulnerable * 10) % 2 === 1) {
-      context.fillStyle = PALETTE.player;
-      context.fillRect(player.x, player.y, player.width, player.height);
+  function drawRoads() {
+    for (const roadY of H_ROADS) {
+      ctx.fillStyle = PALETTE.sidewalk;
+      ctx.fillRect(0, roadY - ROAD_WIDTH / 2 - 14, WORLD.width, ROAD_WIDTH + 28);
+      ctx.fillStyle = PALETTE.road;
+      ctx.fillRect(0, roadY - ROAD_WIDTH / 2, WORLD.width, ROAD_WIDTH);
+      ctx.fillStyle = PALETTE.roadLine;
+      for (let x = 0; x < WORLD.width; x += 80) ctx.fillRect(x, roadY - 3, 44, 6);
+    }
+    for (const roadX of V_ROADS) {
+      ctx.fillStyle = PALETTE.sidewalk;
+      ctx.fillRect(roadX - ROAD_WIDTH / 2 - 14, 0, ROAD_WIDTH + 28, WORLD.height);
+      ctx.fillStyle = PALETTE.road;
+      ctx.fillRect(roadX - ROAD_WIDTH / 2, 0, ROAD_WIDTH, WORLD.height);
+      ctx.fillStyle = PALETTE.roadLine;
+      for (let y = 0; y < WORLD.height; y += 80) ctx.fillRect(roadX - 3, y, 6, 44);
     }
   }
 
-  function drawHud(state) {
-    context.textBaseline = 'top';
-    text(scoreLabel(state.score), 24, 20, 28, PALETTE.text, 'left');
-    text(levelLabel(state.level), FIELD.width / 2, 20, 28, PALETTE.text, 'center');
-    const firstLife = FIELD.width - 24 - LIVES * (LIFE_SIZE + LIFE_GAP) + LIFE_GAP;
-    text('Lives', firstLife - 12, 20, 28, PALETTE.text, 'right');
-    for (let life = 0; life < LIVES; life += 1) {
-      context.fillStyle = life < state.lives ? PALETTE.player : PALETTE.ground;
-      context.fillRect(firstLife + life * (LIFE_SIZE + LIFE_GAP), 24, LIFE_SIZE, LIFE_SIZE);
+  function drawBuildings(state) {
+    for (const b of state.city.buildings) {
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      ctx.fillRect(b.x + 6, b.y + 8, b.w, b.h);
+      ctx.fillStyle = b.color;
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      ctx.fillStyle = PALETTE.buildingRoof;
+      ctx.fillRect(b.x + 8, b.y + 8, b.w - 16, b.h - 16);
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+      if (b.kind === 'shop') {
+        ctx.fillStyle = '#2b2b2b';
+        ctx.fillRect(b.x + 14, b.y + b.h - 26, b.w - 28, 18);
+        if (b.w > 120) text(ctx, b.name, b.x + b.w / 2, b.y + b.h - 12, 12, '#ffffff', 'center', true);
+      } else if (b.name) {
+        text(ctx, b.name, b.x + b.w / 2, b.y + 18, 12, 'rgba(0,0,0,0.55)', 'center');
+      }
     }
+  }
+
+  function drawPalm(palm) {
+    ctx.save();
+    ctx.translate(palm.x, palm.y);
+    ctx.rotate(palm.lean);
+    ctx.strokeStyle = '#7a5a34';
+    ctx.lineWidth = 5 * palm.size;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, -26 * palm.size);
+    ctx.stroke();
+    ctx.fillStyle = '#2e7d32';
+    for (let i = 0; i < 6; i += 1) {
+      const a = (i / 6) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.ellipse(Math.cos(a) * 14 * palm.size, -26 * palm.size + Math.sin(a) * 8 * palm.size, 16 * palm.size, 5 * palm.size, a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawCar(car, now) {
+    ctx.save();
+    ctx.translate(car.x, car.y);
+    ctx.rotate(car.angle);
+    const length = car.kind === 'pickup' ? 72 : 62;
+    const width = 30;
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(-length / 2 + 4, -width / 2 + 5, length, width);
+    ctx.fillStyle = car.wrecked ? '#3a3a3a' : car.color;
+    ctx.beginPath();
+    ctx.roundRect(-length / 2, -width / 2, length, width, 8);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.fillRect(-length / 2 + 12, -width / 2 + 5, 14, width - 10);
+    ctx.fillStyle = 'rgba(20,30,50,0.85)';
+    ctx.fillRect(-6, -width / 2 + 4, 16, width - 8);
+    if (car.kind === 'pickup') {
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillRect(length / 2 - 20, -width / 2 + 4, 14, width - 8);
+    }
+    if (car.kind === 'police') {
+      const blink = Math.floor(now * 4) % 2 === 0;
+      ctx.fillStyle = blink ? '#ff3b30' : '#3d7fd9';
+      ctx.fillRect(-4, -width / 2 - 4, 8, 6);
+      ctx.fillStyle = blink ? '#3d7fd9' : '#ff3b30';
+      ctx.fillRect(4, -width / 2 - 4, 8, 6);
+      text(ctx, 'SHERIFF', 0, -width / 2 - 10, 10, '#ffffff', 'center', true);
+    }
+    ctx.restore();
+  }
+
+  function drawPerson(p, isPlayer, now) {
+    const bob = Math.sin(p.walkCycle || 0) * 2;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    if (p.down > 0) {
+      // Knocked down: lying flat.
+      ctx.rotate(Math.PI / 2);
+      ctx.fillStyle = p.shirt;
+      ctx.fillRect(-12, -7, 24, 14);
+      ctx.restore();
+      return;
+    }
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(0, 10, 10, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Legs, swinging as the person walks.
+    ctx.strokeStyle = '#2b2b3a';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(0, 2);
+    ctx.lineTo(-4 + bob, 12);
+    ctx.moveTo(0, 2);
+    ctx.lineTo(4 - bob, 12);
+    ctx.stroke();
+    // Torso and head.
+    ctx.fillStyle = isPlayer ? '#e8e4da' : p.shirt;
+    ctx.beginPath();
+    ctx.roundRect(-8, -10, 16, 14, 5);
+    ctx.fill();
+    ctx.fillStyle = '#e8b98a';
+    ctx.beginPath();
+    ctx.arc(0, -15, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#3a2a1a';
+    ctx.beginPath();
+    ctx.arc(0, -17, 7, Math.PI, Math.PI * 2);
+    ctx.fill();
+    if (isPlayer) {
+      // A facing tick so the player reads at a glance.
+      ctx.strokeStyle = '#111';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, -15);
+      ctx.lineTo(Math.cos(p.facing) * 14, -15 + Math.sin(p.facing) * 14);
+      ctx.stroke();
+    }
+    if (p.officer) {
+      text(ctx, '★', 0, -26, 12, '#ffd23e', 'center', true);
+    }
+    ctx.restore();
+  }
+
+  function drawMarker(state, now) {
+    const objective = currentObjective(state);
+    if (!objective.marker) return;
+    const pulse = 1 + 0.15 * Math.sin(now * 4);
+    ctx.save();
+    ctx.translate(objective.marker.x, objective.marker.y);
+    ctx.fillStyle = 'rgba(255,210,62,0.25)';
+    ctx.beginPath();
+    ctx.arc(0, 0, 46 * pulse, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#ffd23e';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, 30 * pulse, 0, Math.PI * 2);
+    ctx.stroke();
+    // A floating diamond above the marker.
+    const bobY = -46 + Math.sin(now * 3) * 6;
+    ctx.fillStyle = '#ffd23e';
+    ctx.beginPath();
+    ctx.moveTo(0, bobY - 12);
+    ctx.lineTo(10, bobY);
+    ctx.lineTo(0, bobY + 12);
+    ctx.lineTo(-10, bobY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawWorld(state) {
+    const cam = state.camera;
+    ctx.save();
+    ctx.translate(-cam.x + VIEW.width / 2, -cam.y + VIEW.height / 2);
+    drawGround(state);
+    drawRoads();
+    drawBuildings(state);
+    for (const palm of state.city.palms) drawPalm(palm);
+    // Seashells glint on the sand.
+    for (const shell of state.city.shells) {
+      if (shell.taken) continue;
+      ctx.fillStyle = '#fff3d6';
+      ctx.beginPath();
+      ctx.arc(shell.x, shell.y, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#d9a05a';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    drawMarker(state, state.elapsed);
+    for (const car of state.cars) drawCar(car, state.elapsed);
+    for (const ped of state.peds) drawPerson(ped, false, state.elapsed);
+    for (const officer of state.officers) drawPerson(officer, false, state.elapsed);
+    for (const bullet of state.bullets) {
+      ctx.fillStyle = '#ffe14d';
+      ctx.beginPath();
+      ctx.arc(bullet.x, bullet.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (!state.player.inCar) drawPerson(state.player, true, state.elapsed);
+    ctx.restore();
   }
 
   function drawPanel(title, lines, prompt) {
-    const height = PANEL.top + lines.length * PANEL.line + PANEL.bottom;
-    const x = (FIELD.width - PANEL.width) / 2;
-    const y = (FIELD.height - height) / 2;
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(x, y, PANEL.width, height);
-    context.textBaseline = 'alphabetic';
-    text(title, FIELD.width / 2, y + 78, 48, PALETTE.text, 'center');
-    for (let index = 0; index < lines.length; index += 1) {
-      text(lines[index], FIELD.width / 2, y + PANEL.top + index * PANEL.line, 22, PALETTE.muted, 'center');
+    const width = 640;
+    const lineHeight = 32;
+    const height = 150 + lines.length * lineHeight + 70;
+    const x = (VIEW.width - width) / 2;
+    const y = (VIEW.height - height) / 2;
+    ctx.fillStyle = 'rgba(16,24,32,0.88)';
+    ctx.fillRect(x, y, width, height);
+    ctx.strokeStyle = '#ffd23e';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, width, height);
+    text(ctx, title, VIEW.width / 2, y + 72, 46, '#ffd23e', 'center', true);
+    for (let i = 0; i < lines.length; i += 1) {
+      text(ctx, lines[i], VIEW.width / 2, y + 130 + i * lineHeight, 19, '#eef1f5', 'center');
     }
-    text(prompt, FIELD.width / 2, y + height - 40, 24, PALETTE.coin, 'center');
+    text(ctx, prompt, VIEW.width / 2, y + height - 30, 20, '#7dff8a', 'center', true);
   }
 
-  const TITLE_LINES = ['Dodge the red blocks. Catch the gold coins.', 'Move with ← → or A D.  Pause with P.', ''];
-  const PAUSED_LINES = ['The blocks will wait for you.'];
-  const OVER_LINES = ['', ''];
-
-  /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
-  function draw(state, screen, best) {
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = PALETTE.backdrop;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
-    drawField(state);
+  /** Paint one frame: the town, then the HUD or a panel for the screen. */
+  function draw(state, screen, extra) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#0e1a24';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
+    drawWorld(state);
     if (screen === SCREEN_TITLE) {
-      TITLE_LINES[2] = bestLabel(best);
-      drawPanel('Block Dodger', TITLE_LINES, 'Press Space or click to start');
+      drawPanel('CORAL KEYS', [
+        'An original open-world crime story in a tropical coastal town.',
+        'Walk with WASD. Steal a car with E. Shoot with F. Pause with P.',
+        'Three missions from Marisol. Lose the heat. Own the Keys.',
+        extra && extra.best ? `Best cash banked: $${extra.best}` : '',
+      ], 'Press Space or click to start');
       return;
     }
-    drawHud(state);
-    if (screen === SCREEN_PAUSED) drawPanel('Paused', PAUSED_LINES, 'Press P to resume');
-    else if (screen === SCREEN_OVER) {
-      OVER_LINES[0] = finalLabel(state.score);
-      OVER_LINES[1] = bestLabel(best);
-      drawPanel('Game over', OVER_LINES, 'Press Space or click to play again');
+    // The HUD is drawn by hud.js through the hook below.
+    if (draw.onHud) draw.onHud(ctx, state);
+    if (screen === SCREEN_PAUSED) {
+      drawPanel('Paused', ['The Keys will wait for you.', 'Q saves your game. M mutes the music.'], 'Press P to resume');
+    } else if (screen === SCREEN_BUSTED) {
+      drawPanel('BUSTED', ['The sheriff caught up with you.', `You lost $${extra ? extra.lost : 0}. The clinic patched you up.`], 'Press Space to get back out there');
+    } else if (screen === SCREEN_COMPLETE) {
+      drawPanel('CORAL KEYS IS YOURS', ['All three missions done. Marisol owes you a drink.', 'Free roam: collect shells on the beach, $10 each.'], 'Press Space to keep playing');
     }
   }
 
   resize();
   window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);
   return { draw };
 }
